@@ -1,0 +1,6 @@
+{
+  "name": "Registro de Ganancias y Reinversión",
+  "description": "App para registrar costos, precios de venta, ganancia neta, porcentaje de ganancia y cálculo automático de fondos de reinversión vs ganancia personal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
