@@ -19,13 +19,19 @@ import {
   subscribeToUserSales, 
   subscribeToUserSettings, 
   subscribeToUserPresets,
-  syncSaleToCloud,
-  deleteSaleFromCloud,
-  syncSettingsToCloud,
+  isFirebaseConfigured
+} from './lib/firebase';
+import {
+  checkCurrentSession,
+  fetchCloudData,
+  uploadFullCloudData,
+  syncSingleSaleToCloud,
+  deleteSingleSaleFromCloud,
   syncPresetToCloud,
   deletePresetFromCloud,
-  uploadLocalDataToCloud
-} from './lib/firebase';
+  syncSettingsToCloud,
+  getCachedUser
+} from './lib/syncService';
 import { onAuthStateChanged } from 'firebase/auth';
 
 const STORAGE_KEYS = {
@@ -151,76 +157,115 @@ export default function App() {
     }
   }, [isSimulatorOpen]);
 
-  // 4. Firebase Auth & Real-Time Firestore Sync
+  // 4. Session & Cloud Sync Manager
   useEffect(() => {
-    const auth = getFirebaseAuth();
-    if (!auth) {
-      setSyncStatus('local_only');
-      return;
+    // If Firebase is configured, listen to Firebase Auth
+    if (isFirebaseConfigured()) {
+      const auth = getFirebaseAuth();
+      if (auth) {
+        let unsubSales: (() => void) | null = null;
+        let unsubSettings: (() => void) | null = null;
+        let unsubPresets: (() => void) | null = null;
+
+        const unsubAuth = onAuthStateChanged(auth, (user) => {
+          if (user) {
+            const userProf = mapFirebaseUser(user);
+            setCurrentUser(userProf);
+            setSyncStatus('syncing');
+
+            unsubSales = subscribeToUserSales(
+              user.uid,
+              (cloudSales) => {
+                if (cloudSales.length > 0) setSales(cloudSales);
+                setSyncStatus('synced');
+              },
+              () => setSyncStatus('error')
+            );
+
+            unsubSettings = subscribeToUserSettings(user.uid, (cloudSettings) => {
+              if (cloudSettings) setSettings(cloudSettings);
+            });
+
+            unsubPresets = subscribeToUserPresets(user.uid, (cloudPresets) => {
+              if (cloudPresets.length > 0) setPresets(cloudPresets);
+            });
+            showToast(`Conectado a Firebase como ${userProf.displayName}`);
+          } else {
+            setCurrentUser(null);
+            setSyncStatus('local_only');
+          }
+        });
+
+        return () => {
+          unsubAuth();
+          if (unsubSales) unsubSales();
+          if (unsubSettings) unsubSettings();
+          if (unsubPresets) unsubPresets();
+        };
+      }
     }
 
-    let unsubSales: (() => void) | null = null;
-    let unsubSettings: (() => void) | null = null;
-    let unsubPresets: (() => void) | null = null;
-
-    const unsubAuth = onAuthStateChanged(auth, (user) => {
+    // Built-in Cloud Sync Backend Session check
+    checkCurrentSession().then((user) => {
       if (user) {
-        const userProf = mapFirebaseUser(user);
-        setCurrentUser(userProf);
+        setCurrentUser(user);
         setSyncStatus('syncing');
-
-        // Subscribe to real-time sales on Cloud Firestore
-        unsubSales = subscribeToUserSales(
-          user.uid,
-          (cloudSales) => {
-            if (cloudSales.length > 0) {
-              setSales(cloudSales);
+        // Pull latest cloud data
+        fetchCloudData().then((data) => {
+          if (data) {
+            if (Array.isArray(data.sales) && data.sales.length > 0) {
+              setSales(data.sales);
             }
-            setSyncStatus('synced');
-          },
-          () => {
-            setSyncStatus('error');
+            if (Array.isArray(data.presets) && data.presets.length > 0) {
+              setPresets(data.presets);
+            }
+            if (data.settings) {
+              setSettings(data.settings);
+            }
           }
-        );
-
-        // Subscribe to real-time settings
-        unsubSettings = subscribeToUserSettings(user.uid, (cloudSettings) => {
-          if (cloudSettings) {
-            setSettings(cloudSettings);
-          }
-        });
-
-        // Subscribe to real-time presets
-        unsubPresets = subscribeToUserPresets(user.uid, (cloudPresets) => {
-          if (cloudPresets.length > 0) {
-            setPresets(cloudPresets);
-          }
-        });
-
-        showToast(`Conectado a la nube como ${userProf.displayName}`);
+          setSyncStatus('synced');
+        }).catch(() => setSyncStatus('error'));
       } else {
-        setCurrentUser(null);
         setSyncStatus('local_only');
-        if (unsubSales) unsubSales();
-        if (unsubSettings) unsubSettings();
-        if (unsubPresets) unsubPresets();
       }
     });
+  }, []);
+
+  // Periodic Cloud Sync for multi-device sync between phone & PC
+  useEffect(() => {
+    if (!currentUser || isFirebaseConfigured()) return;
+
+    const pullUpdates = async () => {
+      try {
+        const data = await fetchCloudData();
+        if (data && Array.isArray(data.sales) && data.sales.length > 0) {
+          setSales(data.sales);
+          if (Array.isArray(data.presets)) setPresets(data.presets);
+          if (data.settings) setSettings(data.settings);
+          setSyncStatus('synced');
+        }
+      } catch (err) {
+        console.warn('Sync poll skipped:', err);
+      }
+    };
+
+    // Auto-poll every 8 seconds when connected
+    const interval = setInterval(pullUpdates, 8000);
+    // Also pull immediately when tab or app comes into focus
+    window.addEventListener('focus', pullUpdates);
 
     return () => {
-      unsubAuth();
-      if (unsubSales) unsubSales();
-      if (unsubSettings) unsubSettings();
-      if (unsubPresets) unsubPresets();
+      clearInterval(interval);
+      window.removeEventListener('focus', pullUpdates);
     };
-  }, []);
+  }, [currentUser]);
 
   // Sync actions
   const handleUploadLocalToCloud = async () => {
     if (!currentUser) return;
     try {
       setSyncStatus('syncing');
-      await uploadLocalDataToCloud(currentUser.uid, sales, presets, settings);
+      await uploadFullCloudData(currentUser.uid, sales, presets, settings);
       setSyncStatus('synced');
       showToast('¡Datos locales sincronizados en la nube!');
     } catch (err: any) {
@@ -233,10 +278,17 @@ export default function App() {
   const handleForceSync = async () => {
     if (!currentUser) return;
     setSyncStatus('syncing');
-    setTimeout(() => {
+    try {
+      const data = await fetchCloudData();
+      if (data && Array.isArray(data.sales)) {
+        setSales(data.sales);
+      }
       setSyncStatus('synced');
       showToast('Sincronización actualizada con éxito');
-    }, 600);
+    } catch {
+      setSyncStatus('synced');
+      showToast('Datos locales vigentes');
+    }
   };
 
   // 5. Sales Actions (Local + Cloud)
@@ -260,7 +312,7 @@ export default function App() {
     // Sync to Cloud if authenticated
     if (currentUser) {
       try {
-        await syncSaleToCloud(currentUser.uid, targetSale);
+        await syncSingleSaleToCloud(currentUser.uid, targetSale);
       } catch (err) {
         console.error('Error syncing sale to cloud:', err);
       }
@@ -276,7 +328,7 @@ export default function App() {
 
     if (currentUser) {
       try {
-        await deleteSaleFromCloud(currentUser.uid, saleId);
+        await deleteSingleSaleFromCloud(currentUser.uid, saleId);
       } catch (err) {
         console.error('Error deleting sale from cloud:', err);
       }
@@ -294,7 +346,7 @@ export default function App() {
 
     if (currentUser) {
       try {
-        await syncSaleToCloud(currentUser.uid, duplicated);
+        await syncSingleSaleToCloud(currentUser.uid, duplicated);
       } catch (err) {
         console.error('Error syncing duplicated sale to cloud:', err);
       }
@@ -634,6 +686,19 @@ export default function App() {
         syncStatus={syncStatus}
         onUploadLocalToCloud={handleUploadLocalToCloud}
         onForceSync={handleForceSync}
+        onUserChanged={(user) => {
+          setCurrentUser(user);
+          if (user) {
+            setSyncStatus('synced');
+            fetchCloudData().then((data) => {
+              if (data && Array.isArray(data.sales) && data.sales.length > 0) {
+                setSales(data.sales);
+              }
+            });
+          } else {
+            setSyncStatus('local_only');
+          }
+        }}
       />
 
       <DesktopInstallModal

@@ -15,18 +15,24 @@ import {
   Key,
   Shield,
   Layers,
-  Settings
+  Settings,
+  ExternalLink,
+  AlertTriangle
 } from 'lucide-react';
 import { UserProfile, FirebaseConfig, SyncStatus } from '../types';
 import { 
-  loginWithEmail, 
-  registerWithEmail, 
-  logoutUser, 
   isFirebaseConfigured, 
   getSavedFirebaseConfig, 
   saveFirebaseConfig,
   initializeFirebaseServices
 } from '../lib/firebase';
+import {
+  loginAccount,
+  registerAccount,
+  logoutAccount,
+  loginBuiltinCloud,
+  registerBuiltinCloud
+} from '../lib/syncService';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -35,6 +41,7 @@ interface AuthModalProps {
   syncStatus: SyncStatus;
   onUploadLocalToCloud: () => Promise<void>;
   onForceSync: () => Promise<void>;
+  onUserChanged?: (user: UserProfile | null) => void;
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({
@@ -44,6 +51,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   syncStatus,
   onUploadLocalToCloud,
   onForceSync,
+  onUserChanged,
 }) => {
   const [mode, setMode] = useState<'login' | 'register' | 'config'>('login');
   const [email, setEmail] = useState('');
@@ -52,12 +60,44 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [showConfigNotFound, setShowConfigNotFound] = useState(false);
 
   // Custom Firebase config state
   const existingConfig = getSavedFirebaseConfig();
   const [apiKey, setApiKey] = useState(existingConfig?.apiKey || '');
   const [projectId, setProjectId] = useState(existingConfig?.projectId || '');
   const [appId, setAppId] = useState(existingConfig?.appId || '');
+  const [authDomain, setAuthDomain] = useState(existingConfig?.authDomain || '');
+  const [rawSnippet, setRawSnippet] = useState('');
+  const [snippetParsed, setSnippetParsed] = useState(false);
+
+  const handleSnippetPaste = (val: string) => {
+    setRawSnippet(val);
+    if (!val.trim()) return;
+
+    // Smart regex extraction
+    const extractField = (key: string) => {
+      const regex = new RegExp(`["']?${key}["']?\\s*[:=]\\s*["']([^"']+)["']`, 'i');
+      const match = val.match(regex);
+      return match ? match[1].trim() : '';
+    };
+
+    const foundApiKey = extractField('apiKey');
+    const foundProjectId = extractField('projectId');
+    const foundAppId = extractField('appId');
+    const foundAuthDomain = extractField('authDomain');
+
+    let count = 0;
+    if (foundApiKey) { setApiKey(foundApiKey); count++; }
+    if (foundProjectId) { setProjectId(foundProjectId); count++; }
+    if (foundAppId) { setAppId(foundAppId); count++; }
+    if (foundAuthDomain) { setAuthDomain(foundAuthDomain); count++; }
+
+    if (count >= 2) {
+      setSnippetParsed(true);
+      setErrorMsg(null);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -65,17 +105,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
+    setShowConfigNotFound(false);
     setLoading(true);
 
     try {
-      await loginWithEmail(email, password);
-      setSuccessMsg('¡Sesión iniciada con éxito! Tus datos se sincronizan con la nube.');
+      const loggedUser = await loginAccount(email, password);
+      if (onUserChanged) onUserChanged(loggedUser);
+      if ((loggedUser as any)?.isFallbackCloud) {
+        setSuccessMsg('¡Sesión iniciada con la Nube! Tus datos se sincronizan con tu cuenta.');
+      } else {
+        setSuccessMsg('¡Sesión iniciada con éxito! Tus datos se sincronizan con Firebase.');
+      }
       setTimeout(() => {
         onClose();
-      }, 1200);
+      }, 1000);
     } catch (err: any) {
       console.error(err);
-      if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+      if (err.code === 'auth/configuration-not-found' || err.message?.includes('configuration-not-found')) {
+        setErrorMsg('Firebase: En tu consola de Firebase aún falta habilitar el proveedor Correo/Contraseña.');
+        setShowConfigNotFound(true);
+      } else if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
         setErrorMsg('Email o contraseña incorrectos.');
       } else if (err.code === 'auth/invalid-email') {
         setErrorMsg('El formato del correo electrónico no es válido.');
@@ -91,6 +140,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
+    setShowConfigNotFound(false);
     setLoading(true);
 
     if (password.length < 6) {
@@ -100,16 +150,24 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
 
     try {
-      await registerWithEmail(email, password, displayName);
-      setSuccessMsg('¡Cuenta creada con éxito! Sincronizando con la nube...');
+      const registeredUser = await registerAccount(email, password, displayName);
+      if (onUserChanged) onUserChanged(registeredUser);
+      if ((registeredUser as any)?.isFallbackCloud) {
+        setSuccessMsg('¡Cuenta creada y conectada a la Nube! Sincronizando datos...');
+      } else {
+        setSuccessMsg('¡Cuenta creada con éxito en Firebase! Sincronizando datos...');
+      }
       // Upload local data to cloud immediately
       await onUploadLocalToCloud();
       setTimeout(() => {
         onClose();
-      }, 1200);
+      }, 1000);
     } catch (err: any) {
       console.error(err);
-      if (err.code === 'auth/email-already-in-use') {
+      if (err.code === 'auth/configuration-not-found' || err.message?.includes('configuration-not-found')) {
+        setErrorMsg('Firebase: En tu consola de Firebase aún falta habilitar el proveedor Correo/Contraseña.');
+        setShowConfigNotFound(true);
+      } else if (err.code === 'auth/email-already-in-use') {
         setErrorMsg('Este correo ya está registrado. Prueba iniciando sesión.');
       } else {
         setErrorMsg(err.message || 'Error al registrar la cuenta.');
@@ -119,10 +177,45 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
+  const handleDirectCloudConnect = async () => {
+    if (!email || !password) {
+      setErrorMsg('Ingresa tu email y contraseña para continuar con la Nube.');
+      return;
+    }
+    setErrorMsg(null);
+    setLoading(true);
+    try {
+      let user;
+      if (mode === 'register') {
+        user = await registerBuiltinCloud(email, password, displayName);
+        await onUploadLocalToCloud();
+      } else {
+        try {
+          user = await loginBuiltinCloud(email, password);
+        } catch {
+          // If login failed because not registered yet, register seamlessly
+          user = await registerBuiltinCloud(email, password, displayName);
+          await onUploadLocalToCloud();
+        }
+      }
+      if (onUserChanged) onUserChanged(user);
+      setSuccessMsg('¡Conectado exitosamente a la Sincronización en la Nube!');
+      setShowConfigNotFound(false);
+      setTimeout(() => {
+        onClose();
+      }, 1000);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Error al conectar con la Nube.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleLogout = async () => {
     setLoading(true);
     try {
-      await logoutUser();
+      await logoutAccount();
+      if (onUserChanged) onUserChanged(null);
       setSuccessMsg('Sesión cerrada correctamente.');
     } catch (err: any) {
       setErrorMsg(err.message || 'Error al cerrar sesión');
@@ -137,16 +230,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setErrorMsg('Debes ingresar al menos el apiKey y projectId de Firebase.');
       return;
     }
+    const cleanProjectId = projectId.trim();
     const newConfig: FirebaseConfig = {
       apiKey: apiKey.trim(),
-      authDomain: `${projectId.trim()}.firebaseapp.com`,
-      projectId: projectId.trim(),
-      storageBucket: `${projectId.trim()}.firebasestorage.app`,
+      authDomain: authDomain.trim() || `${cleanProjectId}.firebaseapp.com`,
+      projectId: cleanProjectId,
+      storageBucket: `${cleanProjectId}.firebasestorage.app`,
       appId: appId.trim() || '1:123456789:web:abcdef'
     };
     saveFirebaseConfig(newConfig);
     initializeFirebaseServices(newConfig);
-    setSuccessMsg('Configuración de Firebase guardada con éxito.');
+    setSuccessMsg('¡Configuración de Firebase guardada y activada con éxito!');
+    setMode('login');
+  };
+
+  const handleClearConfig = () => {
+    saveFirebaseConfig(null);
+    const def = getSavedFirebaseConfig();
+    setApiKey(def?.apiKey || '');
+    setProjectId(def?.projectId || '');
+    setAppId(def?.appId || '');
+    setAuthDomain(def?.authDomain || '');
+    setRawSnippet('');
+    setSnippetParsed(false);
+    setSuccessMsg('Configuración restaurada al proyecto predeterminado.');
     setMode('login');
   };
 
@@ -187,6 +294,36 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <div className="p-3 rounded-2xl bg-red-950/80 border border-red-800/80 text-xs text-red-200 flex items-center gap-2.5">
               <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
               <span>{errorMsg}</span>
+            </div>
+          )}
+
+          {showConfigNotFound && (
+            <div className="p-4 rounded-2xl bg-amber-950/40 border border-amber-800/80 space-y-3 text-xs">
+              <div className="flex items-center gap-2 font-bold text-amber-300">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>Activa "Correo electrónico" en Firebase Console</span>
+              </div>
+              <div className="text-[11px] text-slate-300 space-y-2 leading-relaxed">
+                <p>
+                  El error <code className="bg-amber-950/80 px-1 py-0.5 rounded text-amber-300 font-mono">auth/configuration-not-found</code> ocurre porque en tu proyecto de Firebase todavía no se habilitó el método de acceso por Correo/Contraseña:
+                </p>
+                <div className="bg-slate-950/90 p-3 rounded-xl border border-slate-800/80 font-mono text-[11px] space-y-1.5 text-slate-300">
+                  <div>1. Abre <a href={`https://console.firebase.google.com/project/${projectId || 'calculadora-de-ganancias-44b62'}/authentication/providers`} target="_blank" rel="noopener noreferrer" className="underline text-amber-400 font-bold inline-flex items-center gap-0.5">Firebase Console <ExternalLink className="w-3 h-3" /></a></div>
+                  <div>2. Ve a <strong>Authentication</strong> &gt; <strong>Sign-in method</strong></div>
+                  <div>3. Selecciona <strong>Correo electrónico/Contraseña</strong> &gt; Activar &gt; <strong>Guardar</strong></div>
+                </div>
+              </div>
+              <div className="pt-1 flex flex-col sm:flex-row gap-2">
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={handleDirectCloudConnect}
+                  className="flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-sm transition-colors cursor-pointer"
+                >
+                  <Cloud className="w-4 h-4" />
+                  <span>Conectar con Nube Integrada (Sin esperar)</span>
+                </button>
+              </div>
             </div>
           )}
 
@@ -442,69 +579,133 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               {/* Config Form */}
               {mode === 'config' && (
-                <form onSubmit={handleSaveConfig} className="space-y-3">
-                  <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-400 space-y-1">
-                    <span className="font-bold text-white block">Credenciales de Firebase</span>
-                    <p className="text-[11px]">
-                      Puedes conectar tu propio proyecto de Firebase gratuito para Firestore y Authentication.
-                    </p>
+                <form onSubmit={handleSaveConfig} className="space-y-4">
+                  {/* Step-by-step guide */}
+                  <div className="p-3.5 rounded-2xl bg-amber-950/20 border border-amber-900/40 text-xs text-amber-200/90 space-y-2">
+                    <div className="font-bold flex items-center justify-between text-amber-300">
+                      <span>¿Cómo obtener tus credenciales de Firebase?</span>
+                      <a 
+                        href="https://console.firebase.google.com" 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="text-[11px] underline text-amber-400 hover:text-amber-300 flex items-center gap-1 font-mono"
+                      >
+                        Abrir Firebase Console <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                    <ol className="list-decimal list-inside space-y-1 text-[11px] text-slate-300">
+                      <li>Crea o abre tu proyecto gratuito en <strong>Firebase Console</strong>.</li>
+                      <li>En <strong>Compilación</strong>, activa <strong>Authentication</strong> (Método: Correo/Contraseña).</li>
+                      <li>En <strong>Compilación</strong>, activa <strong>Firestore Database</strong> (Modo prueba o reglas abiertas).</li>
+                      <li>En <strong>Configuración del proyecto (ícono de engranaje)</strong> &gt; <em>Tus apps</em>, añade una app <strong>Web (&lt;/&gt;)</strong> y copia el código <code>firebaseConfig</code>.</li>
+                    </ol>
                   </div>
 
+                  {/* Fast Paste Box */}
                   <div>
-                    <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">
-                      API Key
+                    <label className="text-[10px] uppercase text-slate-400 font-bold mb-1.5 flex items-center justify-between">
+                      <span>Pegar configuración completa de Firebase</span>
+                      <span className="text-slate-500 font-normal normal-case">Pega el bloque completo</span>
                     </label>
-                    <input
-                      type="text"
-                      required
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder="AIzaSy..."
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
+                    <textarea
+                      rows={3}
+                      value={rawSnippet}
+                      onChange={(e) => handleSnippetPaste(e.target.value)}
+                      placeholder={'const firebaseConfig = {\n  apiKey: "AIzaSy...",\n  projectId: "mi-negocio",\n  ...\n};'}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-amber-500 placeholder:text-slate-600"
                     />
+                    {snippetParsed && (
+                      <p className="mt-1 text-[11px] text-emerald-400 flex items-center gap-1.5">
+                        <Check className="w-3.5 h-3.5" /> ¡Credenciales extraídas correctamente!
+                      </p>
+                    )}
                   </div>
 
-                  <div>
-                    <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">
-                      Project ID
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={projectId}
-                      onChange={(e) => setProjectId(e.target.value)}
-                      placeholder="mi-proyecto-1234"
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
-                    />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">
+                        API Key
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={apiKey}
+                        onChange={(e) => setApiKey(e.target.value)}
+                        placeholder="AIzaSy..."
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">
+                        Project ID
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={projectId}
+                        onChange={(e) => setProjectId(e.target.value)}
+                        placeholder="mi-proyecto-1234"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
                   </div>
 
-                  <div>
-                    <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">
-                      App ID (Opcional)
-                    </label>
-                    <input
-                      type="text"
-                      value={appId}
-                      onChange={(e) => setAppId(e.target.value)}
-                      placeholder="1:123456789:web:abcdef"
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
-                    />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">
+                        Auth Domain (Opcional)
+                      </label>
+                      <input
+                        type="text"
+                        value={authDomain}
+                        onChange={(e) => setAuthDomain(e.target.value)}
+                        placeholder={`${projectId || 'proyecto'}.firebaseapp.com`}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] uppercase text-slate-500 font-bold mb-1 block">
+                        App ID (Opcional)
+                      </label>
+                      <input
+                        type="text"
+                        value={appId}
+                        onChange={(e) => setAppId(e.target.value)}
+                        placeholder="1:123456789:web:abcdef"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
                   </div>
 
-                  <div className="flex items-center justify-end gap-2 pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setMode('login')}
-                      className="px-3 py-1.5 rounded-xl text-xs text-slate-400 hover:text-white"
-                    >
-                      Volver
-                    </button>
-                    <button
-                      type="submit"
-                      className="px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white"
-                    >
-                      Guardar Configuración
-                    </button>
+                  <div className="flex items-center justify-between pt-2">
+                    {isFirebaseConfigured() ? (
+                      <button
+                        type="button"
+                        onClick={handleClearConfig}
+                        className="px-3 py-1.5 rounded-xl text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-950/30 border border-rose-900/40 transition-colors"
+                      >
+                        Desconectar Firebase
+                      </button>
+                    ) : <div />}
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setMode('login')}
+                        className="px-3 py-1.5 rounded-xl text-xs text-slate-400 hover:text-white"
+                      >
+                        Volver
+                      </button>
+                      <button
+                        type="submit"
+                        className="px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm flex items-center gap-1.5"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Guardar y Activar</span>
+                      </button>
+                    </div>
                   </div>
                 </form>
               )}
@@ -515,7 +716,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
         {/* Footer */}
         <div className="px-6 py-4 border-t border-slate-800 flex items-center justify-between bg-slate-950/60 text-xs text-slate-500 font-mono">
-          <span>{isFirebaseConfigured() ? 'Firebase Activo' : 'Modo Local / Nube Opcional'}</span>
+          <span className="flex items-center gap-1.5 text-emerald-400">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            {isFirebaseConfigured() ? `Firebase Conectado (${getSavedFirebaseConfig()?.projectId})` : 'Sincronización Cloud Activa'}
+          </span>
           <button
             type="button"
             onClick={onClose}

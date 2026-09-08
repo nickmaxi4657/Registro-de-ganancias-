@@ -26,7 +26,16 @@ import { Sale, ProductPreset, AppSettings, UserProfile, FirebaseConfig } from '.
 
 const STORAGE_KEY_CONFIG = 'ganancias_custom_firebase_config';
 
-// Retrieve saved config or default environment configuration
+export const DEFAULT_FIREBASE_CONFIG: FirebaseConfig = {
+  apiKey: "AIzaSyALgjE8lxoXBRM7UXjHywIyFz4gGD7-gl0",
+  authDomain: "calculadora-de-ganancias-44b62.firebaseapp.com",
+  projectId: "calculadora-de-ganancias-44b62",
+  storageBucket: "calculadora-de-ganancias-44b62.firebasestorage.app",
+  messagingSenderId: "715362759164",
+  appId: "1:715362759164:web:4218432b7571d3b085c279"
+};
+
+// Retrieve saved config or default project configuration
 export function getSavedFirebaseConfig(): FirebaseConfig | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_CONFIG);
@@ -55,7 +64,7 @@ export function getSavedFirebaseConfig(): FirebaseConfig | null {
     };
   }
 
-  return null;
+  return DEFAULT_FIREBASE_CONFIG;
 }
 
 export function saveFirebaseConfig(config: FirebaseConfig | null) {
