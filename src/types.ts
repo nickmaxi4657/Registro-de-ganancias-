@@ -47,3 +47,22 @@ export interface SummaryMetrics {
 }
 
 export type DateFilter = 'all' | 'today' | 'week' | 'month' | 'custom';
+
+export interface UserProfile {
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+  photoURL?: string | null;
+  isAnonymous?: boolean;
+}
+
+export type SyncStatus = 'synced' | 'syncing' | 'offline' | 'local_only' | 'error';
+
+export interface FirebaseConfig {
+  apiKey: string;
+  authDomain: string;
+  projectId: string;
+  storageBucket?: string;
+  messagingSenderId?: string;
+  appId: string;
+}

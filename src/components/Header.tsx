@@ -6,15 +6,25 @@ import {
   Download, 
   TrendingUp, 
   Calculator,
-  RefreshCw
+  Cloud,
+  Laptop,
+  Smartphone,
+  UserCheck,
+  WifiOff
 } from 'lucide-react';
-import { AppSettings } from '../types';
+import { AppSettings, UserProfile, SyncStatus } from '../types';
 
 interface HeaderProps {
   settings: AppSettings;
+  currentUser: UserProfile | null;
+  syncStatus: SyncStatus;
+  isOnline: boolean;
+  isInstalled: boolean;
   onOpenNewSale: () => void;
   onOpenCatalog: () => void;
   onOpenSettings: () => void;
+  onOpenAuth: () => void;
+  onOpenInstall: () => void;
   onToggleSimulator: () => void;
   isSimulatorOpen: boolean;
   onExportCSV: () => void;
@@ -23,9 +33,15 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   settings,
+  currentUser,
+  syncStatus,
+  isOnline,
+  isInstalled,
   onOpenNewSale,
   onOpenCatalog,
   onOpenSettings,
+  onOpenAuth,
+  onOpenInstall,
   onToggleSimulator,
   isSimulatorOpen,
   onExportCSV,
@@ -33,6 +49,14 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   return (
     <header className="bg-slate-950 text-slate-200 border-b border-slate-800/90 sticky top-0 z-30 shadow-lg backdrop-blur-md">
+      {/* Offline Alert Strip */}
+      {!isOnline && (
+        <div className="bg-amber-500/10 border-b border-amber-500/20 px-4 py-1.5 text-center text-xs font-mono text-amber-400 flex items-center justify-center gap-2">
+          <WifiOff className="w-3.5 h-3.5" />
+          <span>Modo Offline: Los cambios se guardan localmente y se sincronizarán al reconectar.</span>
+        </div>
+      )}
+
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           
@@ -47,6 +71,9 @@ export const Header: React.FC<HeaderProps> = ({
                   {settings.businessName || 'ProfitFlow'}{' '}
                   <span className="text-emerald-500 font-extrabold">Pro</span>
                 </h1>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-900 text-slate-400 border border-slate-800 hidden sm:inline-block">
+                  PWA + Cloud
+                </span>
               </div>
               <p className="text-xs text-slate-400">
                 Gestión de Ganancias y Reinversión Automática
@@ -54,23 +81,61 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Action buttons & Bento Reinvestment Pill */}
+          {/* Action buttons & Cloud/PWA Hub */}
           <div className="flex items-center flex-wrap gap-2.5">
+            
+            {/* Cloud User / Sync Pill */}
+            <button
+              id="btn-open-cloud-sync"
+              type="button"
+              onClick={onOpenAuth}
+              className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-mono border transition-all ${
+                currentUser
+                  ? 'bg-blue-950/40 text-blue-300 border-blue-800/80 hover:bg-blue-900/40'
+                  : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-white'
+              }`}
+              title={currentUser ? `Conectado como ${currentUser.email}` : 'Iniciar sesión para sincronizar móvil y PC'}
+            >
+              <Cloud className={`w-3.5 h-3.5 ${currentUser ? 'text-blue-400' : 'text-slate-400'}`} />
+              <div className="text-left flex items-center gap-1.5">
+                {currentUser ? (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span className="max-w-[100px] truncate font-medium">{currentUser.displayName || currentUser.email?.split('@')[0]}</span>
+                  </>
+                ) : (
+                  <span>Sincronizar Nube</span>
+                )}
+              </div>
+            </button>
+
+            {/* PWA Desktop/Mobile Install Button */}
+            <button
+              id="btn-open-pwa-install"
+              type="button"
+              onClick={onOpenInstall}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono bg-slate-900 text-slate-300 border border-slate-800 hover:border-emerald-500/50 hover:text-emerald-400 transition-colors"
+              title="Instalar como app de escritorio o móvil"
+            >
+              <Laptop className="w-3.5 h-3.5 text-emerald-400" />
+              <span>{isInstalled ? 'App Instalada' : 'Instalar PC / Celular'}</span>
+            </button>
+
             {/* Bento Reinvestment Pill */}
-            <div className="bg-slate-900 border border-slate-800 px-3.5 py-1.5 rounded-xl hidden sm:flex items-center gap-3">
+            <div className="bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl hidden lg:flex items-center gap-2.5">
               <div className="text-right">
-                <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">
-                  Tasa de Reinversión
+                <p className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">
+                  Reinversión
                 </p>
                 <p className="text-xs text-emerald-400 font-mono font-bold">
-                  {settings.defaultReinvestmentPercent}% Configurado
+                  {settings.defaultReinvestmentPercent}%
                 </p>
               </div>
-              <div className="h-6 w-[1px] bg-slate-800"></div>
+              <div className="h-5 w-[1px] bg-slate-800"></div>
               <button
                 type="button"
                 onClick={onOpenSettings}
-                className="bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] px-2.5 py-1 rounded-lg font-medium transition-colors"
+                className="bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] px-2 py-0.5 rounded-md font-medium transition-colors"
               >
                 Ajustar
               </button>
@@ -88,7 +153,7 @@ export const Header: React.FC<HeaderProps> = ({
               title="Calculadora instantánea de márgenes y reinversión"
             >
               <Calculator className="w-4 h-4" />
-              <span>{isSimulatorOpen ? 'Ocultar Calculadora' : 'Calculadora Rápida'}</span>
+              <span className="hidden sm:inline">{isSimulatorOpen ? 'Ocultar Sim.' : 'Calculadora'}</span>
             </button>
 
             <button
@@ -111,7 +176,7 @@ export const Header: React.FC<HeaderProps> = ({
                 title="Exportar ventas a Excel / CSV"
               >
                 <Download className="w-4 h-4" />
-                <span className="hidden sm:inline">Exportar</span>
+                <span className="hidden md:inline">Exportar</span>
               </button>
             )}
 
@@ -119,7 +184,7 @@ export const Header: React.FC<HeaderProps> = ({
               id="btn-open-settings"
               type="button"
               onClick={onOpenSettings}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-slate-900 text-slate-300 border border-slate-800 hover:border-slate-700 hover:text-white transition-colors sm:hidden"
+              className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-medium bg-slate-900 text-slate-300 border border-slate-800 hover:border-slate-700 hover:text-white transition-colors"
               title="Ajustes"
             >
               <Settings className="w-4 h-4" />
@@ -129,10 +194,10 @@ export const Header: React.FC<HeaderProps> = ({
               id="btn-new-sale"
               type="button"
               onClick={onOpenNewSale}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-all"
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-all"
             >
               <PlusCircle className="w-4 h-4" />
-              <span>Nueva Venta</span>
+              <span>Venta</span>
             </button>
           </div>
 

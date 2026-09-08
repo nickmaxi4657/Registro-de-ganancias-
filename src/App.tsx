@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AppSettings, ProductPreset, Sale } from './types';
+import { AppSettings, ProductPreset, Sale, UserProfile, SyncStatus } from './types';
 import { DEFAULT_SETTINGS, INITIAL_PRESETS, generateSampleSales } from './data/sampleData';
 import { calculateSummaryMetrics } from './utils/calculations';
 import { Header } from './components/Header';
@@ -10,6 +10,23 @@ import { SalesList } from './components/SalesList';
 import { SaleModal } from './components/SaleModal';
 import { ProductCatalogModal } from './components/ProductCatalogModal';
 import { SettingsModal } from './components/SettingsModal';
+import { AuthModal } from './components/AuthModal';
+import { DesktopInstallModal } from './components/DesktopInstallModal';
+import { usePWA } from './hooks/usePWA';
+import { 
+  getFirebaseAuth, 
+  mapFirebaseUser, 
+  subscribeToUserSales, 
+  subscribeToUserSettings, 
+  subscribeToUserPresets,
+  syncSaleToCloud,
+  deleteSaleFromCloud,
+  syncSettingsToCloud,
+  syncPresetToCloud,
+  deletePresetFromCloud,
+  uploadLocalDataToCloud
+} from './lib/firebase';
+import { onAuthStateChanged } from 'firebase/auth';
 
 const STORAGE_KEYS = {
   SALES: 'profit_tracker_sales_v1',
@@ -19,6 +36,15 @@ const STORAGE_KEYS = {
 };
 
 export default function App() {
+  // PWA Hook
+  const { isInstallable, isInstalled, isOnline, installPWA } = usePWA();
+
+  // Cloud Auth & Sync State
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('local_only');
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isInstallModalOpen, setIsInstallModalOpen] = useState(false);
+
   // 1. App State with LocalStorage
   const [sales, setSales] = useState<Sale[]>(() => {
     try {
@@ -84,6 +110,14 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  // Temporary toast helper
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage((current) => (current === msg ? null : current));
+    }, 3200);
+  };
+
   // 3. Save to localStorage
   useEffect(() => {
     try {
@@ -117,39 +151,139 @@ export default function App() {
     }
   }, [isSimulatorOpen]);
 
-  // Temporary toast helper
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => {
-      setToastMessage((current) => (current === msg ? null : current));
-    }, 3200);
+  // 4. Firebase Auth & Real-Time Firestore Sync
+  useEffect(() => {
+    const auth = getFirebaseAuth();
+    if (!auth) {
+      setSyncStatus('local_only');
+      return;
+    }
+
+    let unsubSales: (() => void) | null = null;
+    let unsubSettings: (() => void) | null = null;
+    let unsubPresets: (() => void) | null = null;
+
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        const userProf = mapFirebaseUser(user);
+        setCurrentUser(userProf);
+        setSyncStatus('syncing');
+
+        // Subscribe to real-time sales on Cloud Firestore
+        unsubSales = subscribeToUserSales(
+          user.uid,
+          (cloudSales) => {
+            if (cloudSales.length > 0) {
+              setSales(cloudSales);
+            }
+            setSyncStatus('synced');
+          },
+          () => {
+            setSyncStatus('error');
+          }
+        );
+
+        // Subscribe to real-time settings
+        unsubSettings = subscribeToUserSettings(user.uid, (cloudSettings) => {
+          if (cloudSettings) {
+            setSettings(cloudSettings);
+          }
+        });
+
+        // Subscribe to real-time presets
+        unsubPresets = subscribeToUserPresets(user.uid, (cloudPresets) => {
+          if (cloudPresets.length > 0) {
+            setPresets(cloudPresets);
+          }
+        });
+
+        showToast(`Conectado a la nube como ${userProf.displayName}`);
+      } else {
+        setCurrentUser(null);
+        setSyncStatus('local_only');
+        if (unsubSales) unsubSales();
+        if (unsubSettings) unsubSettings();
+        if (unsubPresets) unsubPresets();
+      }
+    });
+
+    return () => {
+      unsubAuth();
+      if (unsubSales) unsubSales();
+      if (unsubSettings) unsubSettings();
+      if (unsubPresets) unsubPresets();
+    };
+  }, []);
+
+  // Sync actions
+  const handleUploadLocalToCloud = async () => {
+    if (!currentUser) return;
+    try {
+      setSyncStatus('syncing');
+      await uploadLocalDataToCloud(currentUser.uid, sales, presets, settings);
+      setSyncStatus('synced');
+      showToast('¡Datos locales sincronizados en la nube!');
+    } catch (err: any) {
+      console.error(err);
+      showToast('Error al subir datos a la nube');
+      setSyncStatus('error');
+    }
   };
 
-  // 4. Sales Actions
-  const handleSaveSale = (saleData: Omit<Sale, 'id'>, editId?: string) => {
+  const handleForceSync = async () => {
+    if (!currentUser) return;
+    setSyncStatus('syncing');
+    setTimeout(() => {
+      setSyncStatus('synced');
+      showToast('Sincronización actualizada con éxito');
+    }, 600);
+  };
+
+  // 5. Sales Actions (Local + Cloud)
+  const handleSaveSale = async (saleData: Omit<Sale, 'id'>, editId?: string) => {
+    let targetSale: Sale;
     if (editId) {
+      targetSale = { ...saleData, id: editId };
       setSales((prev) =>
-        prev.map((s) => (s.id === editId ? { ...saleData, id: editId } : s))
+        prev.map((s) => (s.id === editId ? targetSale : s))
       );
       showToast('Venta actualizada correctamente');
     } else {
-      const newSale: Sale = {
+      targetSale = {
         ...saleData,
         id: `sale-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       };
-      setSales((prev) => [newSale, ...prev]);
+      setSales((prev) => [targetSale, ...prev]);
       showToast('Venta registrada exitosamente');
     }
+
+    // Sync to Cloud if authenticated
+    if (currentUser) {
+      try {
+        await syncSaleToCloud(currentUser.uid, targetSale);
+      } catch (err) {
+        console.error('Error syncing sale to cloud:', err);
+      }
+    }
+
     setEditingSale(null);
     setSaleInitialData(null);
   };
 
-  const handleDeleteSale = (saleId: string) => {
+  const handleDeleteSale = async (saleId: string) => {
     setSales((prev) => prev.filter((s) => s.id !== saleId));
     showToast('Venta eliminada del historial');
+
+    if (currentUser) {
+      try {
+        await deleteSaleFromCloud(currentUser.uid, saleId);
+      } catch (err) {
+        console.error('Error deleting sale from cloud:', err);
+      }
+    }
   };
 
-  const handleDuplicateSale = (sale: Sale) => {
+  const handleDuplicateSale = async (sale: Sale) => {
     const duplicated: Sale = {
       ...sale,
       id: `sale-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -157,6 +291,14 @@ export default function App() {
     };
     setSales((prev) => [duplicated, ...prev]);
     showToast(`Venta duplicada: "${sale.productName}"`);
+
+    if (currentUser) {
+      try {
+        await syncSaleToCloud(currentUser.uid, duplicated);
+      } catch (err) {
+        console.error('Error syncing duplicated sale to cloud:', err);
+      }
+    }
   };
 
   const handleEditSale = (sale: Sale) => {
@@ -195,8 +337,8 @@ export default function App() {
     setIsSaleModalOpen(true);
   };
 
-  // 5. Presets Actions
-  const handleSavePreset = (preset: ProductPreset) => {
+  // 6. Presets Actions
+  const handleSavePreset = async (preset: ProductPreset) => {
     setPresets((prev) => {
       const exists = prev.some((p) => p.id === preset.id);
       if (exists) {
@@ -205,17 +347,41 @@ export default function App() {
       return [...prev, preset];
     });
     showToast('Producto guardado en el catálogo');
+
+    if (currentUser) {
+      try {
+        await syncPresetToCloud(currentUser.uid, preset);
+      } catch (err) {
+        console.error('Error syncing preset to cloud:', err);
+      }
+    }
   };
 
-  const handleDeletePreset = (presetId: string) => {
+  const handleDeletePreset = async (presetId: string) => {
     setPresets((prev) => prev.filter((p) => p.id !== presetId));
     showToast('Producto eliminado del catálogo');
+
+    if (currentUser) {
+      try {
+        await deletePresetFromCloud(currentUser.uid, presetId);
+      } catch (err) {
+        console.error('Error deleting preset from cloud:', err);
+      }
+    }
   };
 
-  // 6. Settings & Data Actions
-  const handleSaveSettings = (newSettings: AppSettings) => {
+  // 7. Settings & Data Actions
+  const handleSaveSettings = async (newSettings: AppSettings) => {
     setSettings(newSettings);
     showToast('Ajustes guardados');
+
+    if (currentUser) {
+      try {
+        await syncSettingsToCloud(currentUser.uid, newSettings);
+      } catch (err) {
+        console.error('Error syncing settings to cloud:', err);
+      }
+    }
   };
 
   const handleResetAllData = () => {
@@ -231,7 +397,7 @@ export default function App() {
     showToast('Datos de ejemplo cargados');
   };
 
-  // 7. CSV Export
+  // 8. CSV Export
   const handleExportCSV = () => {
     if (sales.length === 0) {
       alert('No hay ventas para exportar.');
@@ -295,7 +461,7 @@ export default function App() {
     showToast('Archivo CSV descargado');
   };
 
-  // 8. JSON Export / Import
+  // 9. JSON Export / Import
   const handleExportJSON = () => {
     const backupData = {
       version: '1.0',
@@ -338,12 +504,18 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans antialiased selection:bg-emerald-500/20 selection:text-emerald-300">
       
-      {/* App Header */}
+      {/* App Header with PWA & Cloud Hub */}
       <Header
         settings={settings}
+        currentUser={currentUser}
+        syncStatus={syncStatus}
+        isOnline={isOnline}
+        isInstalled={isInstalled}
         onOpenNewSale={handleOpenNewSale}
         onOpenCatalog={() => setIsCatalogOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenAuth={() => setIsAuthModalOpen(true)}
+        onOpenInstall={() => setIsInstallModalOpen(true)}
         onToggleSimulator={() => setIsSimulatorOpen((prev) => !prev)}
         isSimulatorOpen={isSimulatorOpen}
         onExportCSV={handleExportCSV}
@@ -409,10 +581,10 @@ export default function App() {
       <footer className="border-t border-slate-900 bg-slate-950 py-5 mt-auto">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500 font-mono">
           <p>
-            <strong className="text-slate-400">Registro de Ganancias y Reinversión</strong> — Auto-Split Financiero
+            <strong className="text-slate-400">Registro de Ganancias y Reinversión</strong> — PWA con Cloud Sync
           </p>
           <div className="flex items-center gap-3">
-            <span>Separación automática de fondo de stock y ganancia de bolsillo</span>
+            <span>Sincronización multi-dispositivo PC y Móvil</span>
           </div>
         </div>
       </footer>
@@ -453,6 +625,23 @@ export default function App() {
         onLoadSampleData={handleLoadSampleData}
         onExportJSON={handleExportJSON}
         onImportJSON={handleImportJSON}
+      />
+
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        currentUser={currentUser}
+        syncStatus={syncStatus}
+        onUploadLocalToCloud={handleUploadLocalToCloud}
+        onForceSync={handleForceSync}
+      />
+
+      <DesktopInstallModal
+        isOpen={isInstallModalOpen}
+        onClose={() => setIsInstallModalOpen(false)}
+        isInstallable={isInstallable}
+        isInstalled={isInstalled}
+        onInstall={installPWA}
       />
 
     </div>
